@@ -47,7 +47,6 @@ contract HealthValidationDAO {
     }
 
     function addValidator() external payable {
-        require(msg.value >= stakeAmount, "Stake amount insufficient");
         require(
             !validators[msg.sender].isActive,
             "You are already a validator"
@@ -57,6 +56,10 @@ contract HealthValidationDAO {
         validators[msg.sender].addr = payable(msg.sender);
         validators[msg.sender].isActive = true;
         maxValidators--;
+
+        if (msg.value > 0) {
+            stakeAmount = msg.value; // Set the stake amount from the sent value
+        }
     }
 
     function submitValidationRequest(string memory _product) external {
