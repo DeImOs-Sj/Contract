@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 contract HealthValidationDAO {
     address public owner;
     uint public maxValidators = 10;
-    uint public minValidatorsRequired = 5;
+    uint public minValidatorsRequired = 3;
     uint public stakeAmount = 0.001 ether;
     uint public rewardAmount = 0.1 ether;
 
@@ -22,12 +22,14 @@ contract HealthValidationDAO {
     }
 
     struct Validator {
-        address payable addr; // Mark as payable
+        address payable addr;
         bool isActive;
     }
 
     mapping(address => Validator) public validators;
     ProductValidation[] public validationRequests;
+
+    uint public productStatus; // 0: Not validated, 1: Healthy, 2: Harmful
 
     constructor() {
         owner = msg.sender;
@@ -58,7 +60,7 @@ contract HealthValidationDAO {
         maxValidators--;
 
         if (msg.value > 0) {
-            stakeAmount = msg.value; // Set the stake amount from the sent value
+            stakeAmount = msg.value;
         }
     }
 
@@ -72,7 +74,7 @@ contract HealthValidationDAO {
 
     function validateProduct(
         uint _requestIndex,
-        ValidationStatus _status
+        string memory _result
     ) external onlyValidator {
         ProductValidation storage request = validationRequests[_requestIndex];
         require(
@@ -81,33 +83,57 @@ contract HealthValidationDAO {
         );
 
         request.approvals.push(msg.sender);
-        request.status = _status;
 
         if (request.approvals.length >= minValidatorsRequired) {
-            if (_status == ValidationStatus.Valid) {
-                // Reward the submitter
-                payable(request.owner).transfer(rewardAmount);
+            uint validVotes = 0;
+            uint invalidVotes = 0;
 
-                // Distribute validator stakes and rewards
-                distributeValidatorRewards(request.approvals);
-            } else {
-                // Penalize the validator
-                validators[msg.sender].isActive = false;
+            for (uint i = 0; i < request.approvals.length; i++) {
+                if (keccak256(bytes(_result)) == keccak256(bytes("Valid"))) {
+                    validVotes++;
+                } else if (
+                    keccak256(bytes(_result)) == keccak256(bytes("Invalid"))
+                ) {
+                    invalidVotes++;
+                }
+            }
+
+            if (validVotes >= minValidatorsRequired) {
+                request.status = ValidationStatus.Valid;
+                productStatus = 1; // Product is Healthy
+            } else if (invalidVotes >= minValidatorsRequired) {
+                request.status = ValidationStatus.Invalid;
+                productStatus = 2; // Product is Harmful
+            }
+
+            if (request.status == ValidationStatus.Valid) {
+                payable(request.owner).transfer(rewardAmount);
             }
         }
     }
 
-    function distributeValidatorRewards(address[] memory _approvals) internal {
-        uint totalStake = stakeAmount * _approvals.length;
-        uint individualReward = rewardAmount / _approvals.length;
-
-        for (uint i = 0; i < _approvals.length; i++) {
-            validators[_approvals[i]].addr.transfer(
-                individualReward + stakeAmount
-            );
+    function getValidVotes(uint _requestIndex) external view returns (uint) {
+        ProductValidation storage request = validationRequests[_requestIndex];
+        uint validVotes = 0;
+        for (uint i = 0; i < request.approvals.length; i++) {
+            address validator = request.approvals[i];
+            if (validators[validator].isActive) {
+                validVotes++;
+            }
         }
+        return validVotes;
+    }
 
-        payable(owner).transfer(totalStake - rewardAmount);
+    function getInvalidVotes(uint _requestIndex) external view returns (uint) {
+        ProductValidation storage request = validationRequests[_requestIndex];
+        uint invalidVotes = 0;
+        for (uint i = 0; i < request.approvals.length; i++) {
+            address validator = request.approvals[i];
+            if (validators[validator].isActive) {
+                invalidVotes++;
+            }
+        }
+        return invalidVotes;
     }
 
     function contractBalance() external view returns (uint) {
