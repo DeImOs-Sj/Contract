@@ -3,10 +3,9 @@ pragma solidity ^0.8.0;
 
 contract HealthValidationDAO {
     address public owner;
-    uint public maxValidators = 10;
-    uint public minValidatorsRequired = 3;
-    uint public stakeAmount = 0.001 ether;
+    uint public stakeAmount = 1 ether;
     uint public rewardAmount = 0.1 ether;
+    address[] public validatorAddresses; // Array to keep track of validator addresses
 
     enum ValidationStatus {
         Pending,
@@ -18,18 +17,21 @@ contract HealthValidationDAO {
         address owner;
         string product;
         ValidationStatus status;
-        address[] approvals;
+        uint validCount;
+        uint invalidCount;
+        mapping(address => bool) voted;
     }
 
     struct Validator {
         address payable addr;
         bool isActive;
+        uint stakedAmount;
     }
 
     mapping(address => Validator) public validators;
     ProductValidation[] public validationRequests;
-
-    uint public productStatus; // 0: Not validated, 1: Healthy, 2: Harmful
+    uint public totalValidators;
+    uint public totalStaked;
 
     constructor() {
         owner = msg.sender;
@@ -53,87 +55,122 @@ contract HealthValidationDAO {
             !validators[msg.sender].isActive,
             "You are already a validator"
         );
-        require(maxValidators > 0, "Validator limit reached");
+        require(msg.value == stakeAmount, "Must stake exactly 1 ether");
 
-        validators[msg.sender].addr = payable(msg.sender);
-        validators[msg.sender].isActive = true;
-        maxValidators--;
+        validators[msg.sender] = Validator({
+            addr: payable(msg.sender),
+            isActive: true,
+            stakedAmount: msg.value
+        });
 
-        if (msg.value > 0) {
-            stakeAmount = msg.value;
-        }
+        totalStaked += msg.value;
+        totalValidators++;
+        validatorAddresses.push(msg.sender);
     }
 
     function submitValidationRequest(string memory _product) external {
-        ProductValidation memory request;
+        ProductValidation storage request = validationRequests.push();
         request.owner = msg.sender;
         request.product = _product;
         request.status = ValidationStatus.Pending;
-        validationRequests.push(request);
     }
 
     function validateProduct(
         uint _requestIndex,
-        string memory _result
+        bool _isValid
     ) external onlyValidator {
+        ProductValidation storage request = validationRequests[_requestIndex];
+        require(!request.voted[msg.sender], "Validator has already voted");
+        require(
+            request.status == ValidationStatus.Pending,
+            "Validation is already finalized"
+        );
+
+        if (_isValid == true) {
+            request.validCount++;
+        } else {
+            request.invalidCount++;
+        }
+
+        // request.voted[msg.sender] = true;
+    }
+
+    function finalizeValidation(uint _requestIndex) external {
         ProductValidation storage request = validationRequests[_requestIndex];
         require(
             request.status == ValidationStatus.Pending,
-            "Already validated"
+            "Validation is already finalized"
+        );
+        require(
+            request.validCount + request.invalidCount == totalValidators,
+            "Not all validators have voted"
         );
 
-        request.approvals.push(msg.sender);
+        if (request.validCount > request.invalidCount) {
+            request.status = ValidationStatus.Valid;
+        } else {
+            request.status = ValidationStatus.Invalid;
+        }
 
-        if (request.approvals.length >= minValidatorsRequired) {
-            uint validVotes = 0;
-            uint invalidVotes = 0;
+        distributeRewardsAndPenalties(request);
+    }
 
-            for (uint i = 0; i < request.approvals.length; i++) {
-                if (keccak256(bytes(_result)) == keccak256(bytes("Valid"))) {
-                    validVotes++;
-                } else if (
-                    keccak256(bytes(_result)) == keccak256(bytes("Invalid"))
-                ) {
-                    invalidVotes++;
-                }
-            }
+    function distributeRewardsAndPenalties(
+        ProductValidation storage request
+    ) private {
+        uint totalReward = totalStaked + (request.validCount * rewardAmount);
+        uint rewardPerValidator = totalReward / totalValidators;
 
-            if (validVotes >= minValidatorsRequired) {
-                request.status = ValidationStatus.Valid;
-                productStatus = 1; // Product is Healthy
-            } else if (invalidVotes >= minValidatorsRequired) {
-                request.status = ValidationStatus.Invalid;
-                productStatus = 2; // Product is Harmful
-            }
-
-            if (request.status == ValidationStatus.Valid) {
-                payable(request.owner).transfer(rewardAmount);
+        for (uint i = 0; i < validatorAddresses.length; i++) {
+            address validatorAddress = validatorAddresses[i];
+            if (request.voted[validatorAddress]) {
+                Validator storage validator = validators[validatorAddress];
+                validator.addr.transfer(rewardPerValidator);
+                totalStaked -= validator.stakedAmount;
             }
         }
     }
 
-    function getValidVotes(uint _requestIndex) external view returns (uint) {
-        ProductValidation storage request = validationRequests[_requestIndex];
-        uint validVotes = 0;
-        for (uint i = 0; i < request.approvals.length; i++) {
-            address validator = request.approvals[i];
-            if (validators[validator].isActive) {
-                validVotes++;
-            }
-        }
-        return validVotes;
+    function getValidVoteCount(
+        uint _requestIndex
+    ) external view returns (uint) {
+        require(
+            _requestIndex < validationRequests.length,
+            "Invalid request index"
+        );
+        return validationRequests[_requestIndex].validCount;
     }
 
-    function getInvalidVotes(uint _requestIndex) external view returns (uint) {
-        ProductValidation storage request = validationRequests[_requestIndex];
-        uint invalidVotes = 0;
-        for (uint i = 0; i < request.approvals.length; i++) {
-            address validator = request.approvals[i];
-            if (validators[validator].isActive) {
-                invalidVotes++;
-            }
-        }
-        return invalidVotes;
+    function getInvalidVoteCount(
+        uint _requestIndex
+    ) external view returns (uint) {
+        require(
+            _requestIndex < validationRequests.length,
+            "Invalid request index"
+        );
+        return validationRequests[_requestIndex].invalidCount;
+    }
+
+    function getFinalStatus(
+        uint _requestIndex
+    ) external view returns (ValidationStatus) {
+        require(
+            _requestIndex < validationRequests.length,
+            "Invalid request index"
+        );
+        return validationRequests[_requestIndex].status;
+    }
+
+    function getDistributedRewards(
+        address _validator
+    ) external view returns (uint) {
+        return validators[_validator].stakedAmount - totalStaked;
+    }
+
+    function getValidatorStake(
+        address _validator
+    ) external view returns (uint) {
+        return validators[_validator].stakedAmount;
     }
 
     function contractBalance() external view returns (uint) {
